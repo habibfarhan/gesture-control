@@ -6,8 +6,10 @@ moving it down lowers it, relative to where the hand was on entering. Breaking
 the pose, or losing the hand, leaves the mode.
 """
 
+import os
 import re
 import subprocess
+from pathlib import Path
 
 from mediapipe.tasks.python.vision.hand_landmarker import HandLandmark as L
 
@@ -19,6 +21,13 @@ STEP = 0.02               # volume changes in 2% steps
 MAX_VOLUME = 1.0
 
 SINK = "@DEFAULT_AUDIO_SINK@"
+
+# Same popup the HyDE volume keys show (~/.local/lib/hyde/volumecontrol.sh):
+# same app name and replace id, so gesture and key popups replace each other.
+NOTIFY_APP = "HyDE Notify"
+NOTIFY_ID = "8"
+ICON_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"),
+                "icons/Wallbash-Icon/media")
 
 
 def in_volume_pose(states):
@@ -40,10 +49,33 @@ def change_volume(delta):
                       f"{abs(delta) * 100:.0f}%{sign}"])
 
 
+def sink_name():
+    out = subprocess.run(["wpctl", "inspect", SINK],
+                         capture_output=True, text=True).stdout
+    match = re.search(r'node\.description = "(.*)"', out)
+    return match.group(1) if match else ""
+
+
+def notify_volume(level, sink=""):
+    vol = round(level * 100)
+    knob = min((vol + 2) // 5 * 5, 100)
+    bar = "." * max(vol // 15 - 1, 0)
+    try:
+        subprocess.Popen(["notify-send", "-a", NOTIFY_APP, "-r", NOTIFY_ID,
+                          "-t", "2000", "-i", str(ICON_DIR / f"knob-{knob}.svg"),
+                          f"{vol}{bar}", sink])
+    except FileNotFoundError:
+        pass  # no notify-send; the camera window still shows the level
+
+
 class VolumeController:
-    def __init__(self, set_volume=change_volume, read_volume=get_volume):
+    def __init__(self, set_volume=change_volume, read_volume=get_volume,
+                 notify=notify_volume, read_sink=sink_name):
         self._set_volume = set_volume
         self._read_volume = read_volume
+        self._notify = notify
+        self._read_sink = read_sink
+        self._sink = ""
         self.active = False
         self.hand = None
         self.level = None  # last known volume, for the on-screen readout
@@ -89,11 +121,13 @@ class VolumeController:
             self._set_volume(delta)
             if self.level is not None:
                 self.level = min(max(self.level + delta, 0.0), MAX_VOLUME)
+                self._notify(self.level, self._sink)
 
     def _enter(self, hand):
         self.active = True
         self.hand = hand
         self.level = self._read_volume()
+        self._sink = self._read_sink()
         self._missing = 0
         self._last = None
         self._acc = 0.0
